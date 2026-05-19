@@ -1,0 +1,42 @@
+# mail-forwarder 配置示例
+# 复制为 config.yaml 并填入实际值
+
+imap:
+  - name: hesi-mailbox
+    host: imap.exmail.qq.com
+    port: 993
+    secure: true
+    user: alert@example.com
+    pass: your_imap_password
+    mailbox: INBOX
+    filter:
+      from: email@service.ekuaibao.biz
+      subject_keyword: "合思工作流失败提醒"
+    timeouts:
+      connection_sec: 15
+      socket_sec: 300
+
+  # - name: another-mailbox
+  #   host: imap.feishu.cn
+  #   port: 993
+  #   secure: true
+  #   user: alert2@example.com
+  #   pass: your_password_2
+  #   mailbox: INBOX
+  #   filter:
+  #     from: noreply@feishu.cn
+
+dingtalk:
+  - name: hesi-robot
+    webhook: https://oapi.dingtalk.com/robot/send?access_token=your_token
+    secret: ""
+    title: "合思工作流失败提醒"
+
+  # - name: dev-robot
+  #   webhook: https://oapi.dingtalk.com/robot/send?access_token=another_token
+  #   secret: ""
+  #   title: "开发通知"
+
+dry_run: false
+max_text_length: 3200
+poll_on_start: true

@@ -1,14 +1,24 @@
-FROM node:20-alpine
+FROM golang:1.23-alpine AS builder
 
-WORKDIR /app
+WORKDIR /build
 
-ENV NODE_ENV=production
+COPY go.mod go.sum ./
+RUN go mod download
 
-COPY package*.json ./
-RUN npm ci --omit=dev
+COPY . .
 
-COPY app.js ./
+ARG VERSION=dev
+RUN CGO_ENABLED=0 go build \
+    -ldflags="-s -w -X main.version=${VERSION}" \
+    -o mail-forwarder .
 
-USER node
+FROM alpine:3.20
 
-CMD ["node", "app.js"]
+RUN apk add --no-cache ca-certificates tzdata
+
+COPY --from=builder /build/mail-forwarder /usr/local/bin/mail-forwarder
+
+USER nobody
+
+ENTRYPOINT ["mail-forwarder"]
+CMD ["-config", "/etc/mail-forwarder/config.yaml"]

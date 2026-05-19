@@ -1,7 +1,7 @@
 services:
   mail-forwarder:
-    image: crpi-yg3r8e9fvlik3jk0.cn-hangzhou.personal.cr.aliyuncs.com/yingqing/my-home:v0.1.2
+    image: crpi-yg3r8e9fvlik3jk0.cn-hangzhou.personal.cr.aliyuncs.com/yingqing/my-home:v0.2.0
     container_name: mail-forwarder
     restart: always
-    env_file:
-      - .env
+    volumes:
+      - ./config.yaml:/etc/mail-forwarder/config.yaml:ro
