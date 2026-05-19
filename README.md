@@ -64,7 +64,6 @@ FILTER_SUBJECT_KEYWORD=合思工作流失败提醒
 本目录包含 workflow，会在推送到 `main` 或打 tag 时构建 Docker 镜像并推送到 GHCR：
 
 ```text
-ghcr.io/<owner>/mail-forwarder:latest
 ghcr.io/<owner>/mail-forwarder:<tag>
 ```
 
@@ -84,4 +83,8 @@ docker compose up -d
 docker logs -f mail-forwarder
 ```
 
-把 `docker-compose.yml` 里的镜像名 `ghcr.io/YOUR_GITHUB_OWNER/mail-forwarder:latest` 改成你的 GHCR 地址。
+生产部署使用明确版本号，不使用 `latest`。当前示例：
+
+```text
+ghcr.io/yunyingk/mail-forwarder:v0.1.0
+```
