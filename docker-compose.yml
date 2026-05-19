@@ -1,6 +1,6 @@
 services:
   mail-forwarder:
-    image: ghcr.io/yunyingk/mail-forwarder:v0.1.0
+    image: crpi-yg3r8e9fvlik3jk0.cn-hangzhou.personal.cr.aliyuncs.com/yingqing/my-home:v0.1.2
     container_name: mail-forwarder
     restart: always
     env_file:
