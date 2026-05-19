@@ -13,7 +13,10 @@ const config = {
   mailbox: env('MAILBOX', 'INBOX'),
   filterFrom: normalizeEmail(requiredEnv('FILTER_FROM')),
   filterSubjectKeyword: env('FILTER_SUBJECT_KEYWORD', ''),
-  dingtalkWebhook: requiredEnv('DINGTALK_WEBHOOK'),
+  dryRun: boolEnv('DRY_RUN', false),
+  markSeenOnDryRun: boolEnv('MARK_SEEN_ON_DRY_RUN', false),
+  dingtalkTitle: env('DINGTALK_TITLE', '合思工作流失败提醒'),
+  dingtalkWebhook: env('DINGTALK_WEBHOOK', ''),
   dingtalkSecret: env('DINGTALK_SECRET', ''),
   httpTimeoutMs: numberEnv('HTTP_TIMEOUT_MS', 10000),
   pollOnStart: boolEnv('POLL_ON_START', true),
@@ -36,7 +39,14 @@ process.on('SIGINT', () => {
 main().catch((error) => fatal(error));
 
 async function main() {
+  if (!config.dryRun && !config.dingtalkWebhook) {
+    throw new Error('missing required env: DINGTALK_WEBHOOK');
+  }
+
   console.log(`starting mail-forwarder for ${config.imapUser}, mailbox=${config.mailbox}`);
+  if (config.dryRun) {
+    console.log('DRY_RUN=true: DingTalk will not be called');
+  }
 
   const client = new ImapFlow({
     host: config.imapHost,
@@ -132,19 +142,27 @@ async function processOne(client, uid) {
 
   const parsed = await simpleParser(message.source);
   const text = parsed.text || htmlToTextFallback(parsed.html) || '';
-  const ekuaibao = parseEkuaibaoFailureMail(text);
   const payload = buildDingTalkPayload({
     uid,
     messageId: parsed.messageId || summary.envelope?.messageId || message.envelope?.messageId || '',
     from,
     subject: parsed.subject || summary.envelope?.subject || message.envelope?.subject || '',
     date: parsed.date || summary.envelope?.date || message.envelope?.date || null,
-    text,
-    ekuaibao
+    text
   });
 
+  if (config.dryRun) {
+    console.log('dry-run payload:', JSON.stringify(payload.meta, null, 2));
+    if (!config.markSeenOnDryRun) {
+      console.log(`dry-run skipped mark seen: uid=${uid}`);
+      return;
+    }
+  }
+
   try {
-    await postToDingTalk(payload);
+    if (!config.dryRun) {
+      await postToDingTalk(payload);
+    }
     await client.messageFlagsAdd(uid, ['\\Seen'], { uid: true });
     console.log(`forwarded and marked seen: uid=${uid}, subject=${JSON.stringify(payload.meta.subject)}`);
   } catch (error) {
@@ -156,13 +174,18 @@ async function processOne(client, uid) {
 function buildDingTalkPayload(mail) {
   const date = mail.date instanceof Date ? mail.date.toISOString() : '';
   const body = trimText(mail.text, config.maxTextLength);
-  const content = buildDingTalkText(mail, body, date);
+  const content = [
+    `### ${config.dingtalkTitle}`,
+    '',
+    body || '(无正文)'
+  ].join('\n');
 
   return {
     dingtalk: {
-      msgtype: 'text',
-      text: {
-        content
+      msgtype: 'markdown',
+      markdown: {
+        title: config.dingtalkTitle,
+        text: content
       }
     },
     meta: {
@@ -171,84 +194,9 @@ function buildDingTalkPayload(mail) {
       from: mail.from,
       subject: mail.subject,
       date,
-      text: body,
-      ekuaibao: mail.ekuaibao
+      text: body
     }
   };
-}
-
-function buildDingTalkText(mail, body, date) {
-  const workflow = mail.ekuaibao?.workflowName;
-  const result = mail.ekuaibao?.result;
-  const runTime = mail.ekuaibao?.runTime;
-  const runId = mail.ekuaibao?.runId;
-  const failedNodes = mail.ekuaibao?.failedNodes || [];
-
-  if (!workflow && !runId && !failedNodes.length) {
-    return [
-      '合思工作流失败提醒',
-      `发件人: ${mail.from}`,
-      `主题: ${mail.subject || '(无主题)'}`,
-      date ? `邮件时间: ${date}` : '',
-      '',
-      body || '(无正文)'
-    ].filter(Boolean).join('\n');
-  }
-
-  const lines = [
-    '合思工作流失败提醒',
-    workflow ? `企业/工作流: ${workflow}` : '',
-    result ? `流程运行结果: ${result}` : '',
-    runTime ? `运行时间: ${runTime}` : '',
-    runId ? `运行ID: ${runId}` : '',
-    ''
-  ].filter(Boolean);
-
-  if (failedNodes.length) {
-    lines.push('失败节点:');
-    for (const node of failedNodes) {
-      lines.push(`- ${node.name}${node.action ? ` (${node.action})` : ''}`);
-    }
-    lines.push('');
-  }
-
-  lines.push('原始邮件摘要:');
-  lines.push(trimText(body, 1200) || '(无正文)');
-  return lines.join('\n');
-}
-
-function parseEkuaibaoFailureMail(text) {
-  const normalized = String(text || '')
-    .replace(/\r\n/g, '\n')
-    .replace(/[“”]/g, '"')
-    .replace(/[「」]/g, '"');
-
-  const workflowName = matchFirst(normalized, /工作流\s*"([^"]+)"/);
-  const result = matchFirst(normalized, /流程运行结果[:：]\s*"([^"]+)"/);
-  const runTime = matchFirst(normalized, /运行时间[:：]\s*"([^"]+)"/);
-  const runId = matchFirst(normalized, /运行ID[:：]\s*"([^"]+)"/);
-  const failedNodes = [];
-  const nodePattern = /失败节点[:：]\s*"([^"]+)"(?:\n|\s)+处理方式[:：]\s*"([^"]+)"/g;
-
-  for (const match of normalized.matchAll(nodePattern)) {
-    failedNodes.push({
-      name: match[1].trim(),
-      action: match[2].trim()
-    });
-  }
-
-  return {
-    workflowName,
-    result,
-    runTime,
-    runId,
-    failedNodes
-  };
-}
-
-function matchFirst(text, pattern) {
-  const match = text.match(pattern);
-  return match?.[1]?.trim() || '';
 }
 
 async function postToDingTalk(payload) {

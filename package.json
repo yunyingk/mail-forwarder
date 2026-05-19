@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "start": "node app.js",
+    "dev": "node --env-file=.env app.js",
     "lint": "node --check app.js"
   },
   "dependencies": {
