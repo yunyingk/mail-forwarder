@@ -1,8 +1,11 @@
+import dns from 'node:dns';
 import crypto from 'node:crypto';
 import process from 'node:process';
 import axios from 'axios';
 import { ImapFlow } from 'imapflow';
 import { simpleParser } from 'mailparser';
+
+dns.setDefaultResultOrder('ipv4first');
 
 const config = {
   imapHost: requiredEnv('IMAP_HOST'),
@@ -19,12 +22,15 @@ const config = {
   dingtalkWebhook: env('DINGTALK_WEBHOOK', ''),
   dingtalkSecret: env('DINGTALK_SECRET', ''),
   httpTimeoutMs: numberEnv('HTTP_TIMEOUT_MS', 10000),
+  imapConnectionTimeoutMs: numberEnv('IMAP_CONNECTION_TIMEOUT_MS', 15000),
+  imapSocketTimeoutMs: numberEnv('IMAP_SOCKET_TIMEOUT_MS', 300000),
   pollOnStart: boolEnv('POLL_ON_START', true),
   maxTextLength: numberEnv('MAX_TEXT_LENGTH', 3200)
 };
 
 let shuttingDown = false;
 let processing = false;
+let pendingScan = false;
 
 process.on('SIGTERM', () => {
   shuttingDown = true;
@@ -56,11 +62,21 @@ async function main() {
       user: config.imapUser,
       pass: config.imapPass
     },
+    connectionTimeout: config.imapConnectionTimeoutMs,
+    socketTimeout: config.imapSocketTimeoutMs,
+    tls: {
+      family: 4
+    },
     logger: false
   });
 
   client.on('error', (error) => {
     fatal(error);
+  });
+
+  client.on('exists', (data) => {
+    console.log(`mailbox exists changed: ${data.prevCount} -> ${data.count}`);
+    scheduleScan(client);
   });
 
   await client.connect();
@@ -76,13 +92,28 @@ async function main() {
     }
 
     while (!shuttingDown) {
-      await client.idle();
-      await processUnread(client);
+      try {
+        await client.idle();
+      } catch (error) {
+        fatal(error);
+      }
     }
   } finally {
     lock.release();
     await client.logout().catch(() => {});
   }
+}
+
+function scheduleScan(client) {
+  if (pendingScan || shuttingDown) {
+    return;
+  }
+
+  pendingScan = true;
+  setTimeout(() => {
+    pendingScan = false;
+    processUnread(client).catch((error) => fatal(error));
+  }, 500);
 }
 
 async function processUnread(client) {
