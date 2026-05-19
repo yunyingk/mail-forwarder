@@ -1,0 +1,7 @@
+services:
+  mail-forwarder:
+    image: ghcr.io/YOUR_GITHUB_OWNER/mail-forwarder:latest
+    container_name: mail-forwarder
+    restart: always
+    env_file:
+      - .env
