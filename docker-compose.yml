@@ -1,7 +1,9 @@
 services:
   mail-forwarder:
-    image: crpi-yg3r8e9fvlik3jk0.cn-hangzhou.personal.cr.aliyuncs.com/yingqing/my-home:v0.2.0
+    image: ghcr.io/yunyingk/mail-forwarder:v0.2.2
     container_name: mail-forwarder
     restart: always
     volumes:
       - ./config.yaml:/etc/mail-forwarder/config.yaml:ro
+      # Set state.path to /var/lib/mail-forwarder/state.json in config.yaml.
+      - ./data:/var/lib/mail-forwarder
