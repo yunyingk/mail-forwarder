@@ -1,0 +1,318 @@
+openapi: 3.1.0
+info:
+  title: mail-forwarder API
+  version: 0.3.0
+  description: |
+    mail-forwarder has two HTTP surfaces:
+
+    1. Outbound webhook delivery. mail-forwarder calls a configured downstream
+       webhook when a watched IMAP mailbox receives unread mail.
+    2. Local admin API. mail-forwarder can expose read-only local endpoints for
+       health, configured mailbox sources, redacted config, and this OpenAPI
+       document.
+
+    Recommended mailbox setup: use mail-provider rules to move target messages
+    into a dedicated mailbox folder, then configure mail-forwarder to watch that
+    folder. IMAP UID values are scoped to one source mailbox and are not global.
+servers:
+  - url: http://127.0.0.1:6245
+    description: Optional local read-only admin API when admin.enabled is true
+paths:
+  /healthz:
+    get:
+      operationId: getHealth
+      summary: Health check
+      responses:
+        "200":
+          description: The process is running.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+  /sources:
+    get:
+      operationId: listSources
+      summary: List configured IMAP sources
+      responses:
+        "200":
+          description: Configured mailbox sources.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sources]
+                properties:
+                  sources:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/SourceSummary"
+  /config:
+    get:
+      operationId: getRedactedConfig
+      summary: Get redacted runtime config
+      responses:
+        "200":
+          description: Runtime config with credentials and secrets redacted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RedactedConfig"
+  /openapi:
+    get:
+      operationId: getOpenAPI
+      summary: Get generated OpenAPI JSON as a normal API response
+      responses:
+        "200":
+          description: OpenAPI document.
+          content:
+            application/json:
+              schema:
+                type: object
+  /openapi.json:
+    get:
+      operationId: getOpenAPIJSON
+      summary: Get generated OpenAPI JSON for URL import tools
+      responses:
+        "200":
+          description: OpenAPI document.
+          content:
+            application/json:
+              schema:
+                type: object
+  /mail-ingress:
+    post:
+      operationId: receiveForwardedMail
+      summary: Outbound webhook request sent by mail-forwarder
+      description: |
+        This endpoint is implemented by the downstream HTTP agent, not by
+        mail-forwarder. It documents the request shape mail-forwarder sends to
+        each configured webhook URL.
+      security:
+        - webhookSignature: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MailWebhookPayload"
+      responses:
+        "2XX":
+          description: The downstream accepted the mail event. mail-forwarder marks the message as seen after this.
+        default:
+          description: Non-2xx responses are treated as delivery failure. The message remains unread.
+components:
+  securitySchemes:
+    webhookSignature:
+      type: apiKey
+      in: header
+      name: X-Mail-Forwarder-Signature
+      description: |
+        HMAC-SHA256 signature. Header value format: sha256=<hex>.
+        Signature input: <X-Mail-Forwarder-Timestamp>.<raw request body>.
+  schemas:
+    HealthResponse:
+      type: object
+      required: [ok]
+      properties:
+        ok:
+          type: boolean
+          example: true
+    SourceSummary:
+      type: object
+      required: [name, host, port, secure, user, mailbox, webhook_url]
+      properties:
+        name:
+          type: string
+        host:
+          type: string
+        port:
+          type: integer
+        secure:
+          type: boolean
+        user:
+          type: string
+        mailbox:
+          type: string
+        webhook_url:
+          type: string
+    RedactedConfig:
+      type: object
+      required: [imap, admin, dry_run, poll_on_start]
+      properties:
+        imap:
+          type: array
+          items:
+            $ref: "#/components/schemas/RedactedIMAPSource"
+        admin:
+          $ref: "#/components/schemas/AdminConfig"
+        dry_run:
+          type: boolean
+        poll_on_start:
+          type: boolean
+    RedactedIMAPSource:
+      type: object
+      required: [name, host, port, secure, user, pass, mailbox, webhook]
+      properties:
+        name:
+          type: string
+        host:
+          type: string
+        port:
+          type: integer
+        secure:
+          type: boolean
+        user:
+          type: string
+        pass:
+          type: string
+          example: "***"
+        mailbox:
+          type: string
+        webhook:
+          $ref: "#/components/schemas/RedactedWebhookConfig"
+        payload:
+          $ref: "#/components/schemas/PayloadConfig"
+        idle_fallback:
+          $ref: "#/components/schemas/IdleFallbackConfig"
+        timeouts:
+          $ref: "#/components/schemas/IMAPTimeouts"
+    RedactedWebhookConfig:
+      type: object
+      required: [url, secret, timeout_sec]
+      properties:
+        url:
+          type: string
+        secret:
+          type: string
+          example: "***"
+        timeout_sec:
+          type: integer
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+    PayloadConfig:
+      type: object
+      properties:
+        include_raw_rfc822:
+          type: boolean
+        attachments:
+          type: string
+          enum: [disabled, metadata, inline_base64]
+    IdleFallbackConfig:
+      type: object
+      properties:
+        allow:
+          type: boolean
+        interval_sec:
+          type: integer
+    IMAPTimeouts:
+      type: object
+      properties:
+        connection_sec:
+          type: integer
+        socket_sec:
+          type: integer
+    AdminConfig:
+      type: object
+      properties:
+        enabled:
+          type: boolean
+        listen:
+          type: string
+    MailWebhookPayload:
+      type: object
+      required: [source, message]
+      properties:
+        source:
+          $ref: "#/components/schemas/MailSource"
+        message:
+          $ref: "#/components/schemas/MailMessage"
+    MailSource:
+      type: object
+      required: [name, mailbox]
+      properties:
+        name:
+          type: string
+          description: Configured source name. Include this in deduplication keys.
+        mailbox:
+          type: string
+          description: IMAP mailbox folder name. UID values are scoped to this mailbox.
+    MailMessage:
+      type: object
+      required: [uid, subject, from, bodies]
+      properties:
+        uid:
+          type: integer
+          format: uint32
+          description: IMAP UID scoped to the source mailbox.
+        message_id:
+          type: string
+        date:
+          type: string
+          format: date-time
+        subject:
+          type: string
+        from:
+          type: string
+        to:
+          type: array
+          items:
+            type: string
+        cc:
+          type: array
+          items:
+            type: string
+        reply_to:
+          type: array
+          items:
+            type: string
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+        bodies:
+          $ref: "#/components/schemas/MailBodies"
+        attachments:
+          type: array
+          items:
+            $ref: "#/components/schemas/MailAttachment"
+        raw:
+          $ref: "#/components/schemas/RawMail"
+    MailBodies:
+      type: object
+      properties:
+        text:
+          type: string
+        html:
+          type: string
+          description: HTML is forwarded as-is and is not sanitized by mail-forwarder.
+    MailAttachment:
+      type: object
+      required: [size]
+      properties:
+        filename:
+          type: string
+        content_type:
+          type: string
+        content_id:
+          type: string
+        disposition:
+          type: string
+        size:
+          type: integer
+        content_base64:
+          type: string
+          description: Present only when payload.attachments is inline_base64.
+    RawMail:
+      type: object
+      required: [size, included]
+      properties:
+        rfc822_base64:
+          type: string
+          description: Present only when payload.include_raw_rfc822 is true.
+        size:
+          type: integer
+        included:
+          type: boolean

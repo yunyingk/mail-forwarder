@@ -1,0 +1,512 @@
+{
+  "components": {
+    "schemas": {
+      "AdminConfig": {
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "listen": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "HealthResponse": {
+        "properties": {
+          "ok": {
+            "example": true,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ok"
+        ],
+        "type": "object"
+      },
+      "IMAPTimeouts": {
+        "properties": {
+          "connection_sec": {
+            "type": "integer"
+          },
+          "socket_sec": {
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "IdleFallbackConfig": {
+        "properties": {
+          "allow": {
+            "type": "boolean"
+          },
+          "interval_sec": {
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "MailAttachment": {
+        "properties": {
+          "content_base64": {
+            "description": "Present only when payload.attachments is inline_base64.",
+            "type": "string"
+          },
+          "content_id": {
+            "type": "string"
+          },
+          "content_type": {
+            "type": "string"
+          },
+          "disposition": {
+            "type": "string"
+          },
+          "filename": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "size"
+        ],
+        "type": "object"
+      },
+      "MailBodies": {
+        "properties": {
+          "html": {
+            "description": "HTML is forwarded as-is and is not sanitized by mail-forwarder.",
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "MailMessage": {
+        "properties": {
+          "attachments": {
+            "items": {
+              "$ref": "#/components/schemas/MailAttachment"
+            },
+            "type": "array"
+          },
+          "bodies": {
+            "$ref": "#/components/schemas/MailBodies"
+          },
+          "cc": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "date": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "from": {
+            "type": "string"
+          },
+          "headers": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "message_id": {
+            "type": "string"
+          },
+          "raw": {
+            "$ref": "#/components/schemas/RawMail"
+          },
+          "reply_to": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "to": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "uid": {
+            "description": "IMAP UID scoped to the source mailbox.",
+            "format": "uint32",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "uid",
+          "subject",
+          "from",
+          "bodies"
+        ],
+        "type": "object"
+      },
+      "MailSource": {
+        "properties": {
+          "mailbox": {
+            "description": "IMAP mailbox folder name. UID values are scoped to this mailbox.",
+            "type": "string"
+          },
+          "name": {
+            "description": "Configured source name. Include this in deduplication keys.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "mailbox"
+        ],
+        "type": "object"
+      },
+      "MailWebhookPayload": {
+        "properties": {
+          "message": {
+            "$ref": "#/components/schemas/MailMessage"
+          },
+          "source": {
+            "$ref": "#/components/schemas/MailSource"
+          }
+        },
+        "required": [
+          "source",
+          "message"
+        ],
+        "type": "object"
+      },
+      "PayloadConfig": {
+        "properties": {
+          "attachments": {
+            "enum": [
+              "disabled",
+              "metadata",
+              "inline_base64"
+            ],
+            "type": "string"
+          },
+          "include_raw_rfc822": {
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "RawMail": {
+        "properties": {
+          "included": {
+            "type": "boolean"
+          },
+          "rfc822_base64": {
+            "description": "Present only when payload.include_raw_rfc822 is true.",
+            "type": "string"
+          },
+          "size": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "size",
+          "included"
+        ],
+        "type": "object"
+      },
+      "RedactedConfig": {
+        "properties": {
+          "admin": {
+            "$ref": "#/components/schemas/AdminConfig"
+          },
+          "dry_run": {
+            "type": "boolean"
+          },
+          "imap": {
+            "items": {
+              "$ref": "#/components/schemas/RedactedIMAPSource"
+            },
+            "type": "array"
+          },
+          "poll_on_start": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "imap",
+          "admin",
+          "dry_run",
+          "poll_on_start"
+        ],
+        "type": "object"
+      },
+      "RedactedIMAPSource": {
+        "properties": {
+          "host": {
+            "type": "string"
+          },
+          "idle_fallback": {
+            "$ref": "#/components/schemas/IdleFallbackConfig"
+          },
+          "mailbox": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "pass": {
+            "example": "***",
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/PayloadConfig"
+          },
+          "port": {
+            "type": "integer"
+          },
+          "secure": {
+            "type": "boolean"
+          },
+          "timeouts": {
+            "$ref": "#/components/schemas/IMAPTimeouts"
+          },
+          "user": {
+            "type": "string"
+          },
+          "webhook": {
+            "$ref": "#/components/schemas/RedactedWebhookConfig"
+          }
+        },
+        "required": [
+          "name",
+          "host",
+          "port",
+          "secure",
+          "user",
+          "pass",
+          "mailbox",
+          "webhook"
+        ],
+        "type": "object"
+      },
+      "RedactedWebhookConfig": {
+        "properties": {
+          "headers": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "secret": {
+            "example": "***",
+            "type": "string"
+          },
+          "timeout_sec": {
+            "type": "integer"
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "secret",
+          "timeout_sec"
+        ],
+        "type": "object"
+      },
+      "SourceSummary": {
+        "properties": {
+          "host": {
+            "type": "string"
+          },
+          "mailbox": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "port": {
+            "type": "integer"
+          },
+          "secure": {
+            "type": "boolean"
+          },
+          "user": {
+            "type": "string"
+          },
+          "webhook_url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "host",
+          "port",
+          "secure",
+          "user",
+          "mailbox",
+          "webhook_url"
+        ],
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "webhookSignature": {
+        "description": "HMAC-SHA256 signature. Header value format: sha256=\u003chex\u003e.\nSignature input: \u003cX-Mail-Forwarder-Timestamp\u003e.\u003craw request body\u003e.\n",
+        "in": "header",
+        "name": "X-Mail-Forwarder-Signature",
+        "type": "apiKey"
+      }
+    }
+  },
+  "info": {
+    "description": "mail-forwarder has two HTTP surfaces:\n\n1. Outbound webhook delivery. mail-forwarder calls a configured downstream\n   webhook when a watched IMAP mailbox receives unread mail.\n2. Local admin API. mail-forwarder can expose read-only local endpoints for\n   health, configured mailbox sources, redacted config, and this OpenAPI\n   document.\n\nRecommended mailbox setup: use mail-provider rules to move target messages\ninto a dedicated mailbox folder, then configure mail-forwarder to watch that\nfolder. IMAP UID values are scoped to one source mailbox and are not global.\n",
+    "title": "mail-forwarder API",
+    "version": "0.3.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/config": {
+      "get": {
+        "operationId": "getRedactedConfig",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RedactedConfig"
+                }
+              }
+            },
+            "description": "Runtime config with credentials and secrets redacted."
+          }
+        },
+        "summary": "Get redacted runtime config"
+      }
+    },
+    "/healthz": {
+      "get": {
+        "operationId": "getHealth",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            },
+            "description": "The process is running."
+          }
+        },
+        "summary": "Health check"
+      }
+    },
+    "/mail-ingress": {
+      "post": {
+        "description": "This endpoint is implemented by the downstream HTTP agent, not by\nmail-forwarder. It documents the request shape mail-forwarder sends to\neach configured webhook URL.\n",
+        "operationId": "receiveForwardedMail",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MailWebhookPayload"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "2XX": {
+            "description": "The downstream accepted the mail event. mail-forwarder marks the message as seen after this."
+          },
+          "default": {
+            "description": "Non-2xx responses are treated as delivery failure. The message remains unread."
+          }
+        },
+        "security": [
+          {
+            "webhookSignature": []
+          },
+          {}
+        ],
+        "summary": "Outbound webhook request sent by mail-forwarder"
+      }
+    },
+    "/openapi": {
+      "get": {
+        "operationId": "getOpenAPI",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OpenAPI document."
+          }
+        },
+        "summary": "Get generated OpenAPI JSON as a normal API response"
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "operationId": "getOpenAPIJSON",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "OpenAPI document."
+          }
+        },
+        "summary": "Get generated OpenAPI JSON for URL import tools"
+      }
+    },
+    "/sources": {
+      "get": {
+        "operationId": "listSources",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "sources": {
+                      "items": {
+                        "$ref": "#/components/schemas/SourceSummary"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "sources"
+                  ],
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Configured mailbox sources."
+          }
+        },
+        "summary": "List configured IMAP sources"
+      }
+    }
+  },
+  "servers": [
+    {
+      "description": "Optional local read-only admin API when admin.enabled is true",
+      "url": "http://127.0.0.1:6245"
+    }
+  ]
+}

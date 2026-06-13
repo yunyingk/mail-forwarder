@@ -38,3 +38,7 @@ imap:
 
 dry_run: false
 poll_on_start: true
+
+admin:
+  enabled: false
+  listen: 127.0.0.1:6245

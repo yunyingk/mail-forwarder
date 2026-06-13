@@ -75,6 +75,10 @@ imap:
 
 dry_run: false
 poll_on_start: true
+
+admin:
+  enabled: false
+  listen: 127.0.0.1:6245
 ```
 
 Environment variables can be referenced in config values:
@@ -82,6 +86,11 @@ Environment variables can be referenced in config values:
 ```yaml
 pass: ${IMAP_PASS}
 ```
+
+Recommended setup: create a dedicated mailbox folder and use mail-provider
+rules to move target messages into that folder. Configure `mailbox` to watch
+that folder. mail-forwarder only searches the configured mailbox, not the whole
+email account.
 
 ## Delivery Semantics
 
@@ -107,86 +116,38 @@ to let `go-imap` use periodic NOOP polling with `idle_fallback.interval_sec`.
 
 ## Webhook API
 
-`mail-forwarder` sends an HTTP `POST` request to the configured webhook URL.
+The API contract is maintained as OpenAPI:
 
-Headers:
+- Source: `api/openapi.yaml`
+- Generated JSON: `admin/openapi.json`
 
-```http
-Content-Type: application/json
-User-Agent: mail-forwarder
-X-Mail-Forwarder-Timestamp: 1718265600
-X-Mail-Forwarder-Signature: sha256=<hex-hmac>
+The OpenAPI document includes both surfaces:
+
+- `/mail-ingress`: the outbound webhook request that downstream agents should implement.
+- Local admin endpoints: `/healthz`, `/sources`, `/config`, `/openapi`, and `/openapi.json`.
+
+`/mail-ingress` is not served by mail-forwarder. It documents the request shape
+mail-forwarder sends to each configured webhook URL.
+
+## Admin API
+
+The local admin API is disabled by default and does not occupy a port unless
+enabled:
+
+```yaml
+admin:
+  enabled: true
+  listen: 127.0.0.1:6245
 ```
 
-`X-Mail-Forwarder-Timestamp` and `X-Mail-Forwarder-Signature` are sent only
-when `webhook.secret` is configured.
+Use `0.0.0.0:6245` only when you intentionally want the API reachable outside
+the local machine or container.
 
-Signature input:
+Tools that import OpenAPI by URL can use:
 
 ```text
-<unix_timestamp>.<raw_request_body>
+http://127.0.0.1:6245/openapi.json
 ```
-
-Signature algorithm:
-
-```text
-HMAC-SHA256(secret, input)
-```
-
-### Request Body
-
-```json
-{
-  "source": {
-    "name": "hesi-mailbox",
-    "mailbox": "INBOX"
-  },
-  "message": {
-    "uid": 12345,
-    "message_id": "<message-id@example.com>",
-    "date": "2026-06-13T12:30:00+08:00",
-    "subject": "Example subject",
-    "from": "notice@example.com",
-    "to": ["alert@example.com"],
-    "cc": [],
-    "reply_to": [],
-    "headers": {
-      "message-id": "<message-id@example.com>",
-      "return-path": "<notice@example.com>",
-      "authentication-results": "..."
-    },
-    "bodies": {
-      "text": "plain text body",
-      "html": "<html><body>html body</body></html>"
-    },
-    "attachments": [
-      {
-        "filename": "invoice.pdf",
-        "content_type": "application/pdf",
-        "content_id": "",
-        "disposition": "attachment; filename=\"invoice.pdf\"",
-        "size": 123456,
-        "content_base64": "JVBERi0x..."
-      }
-    ],
-    "raw": {
-      "rfc822_base64": "RnJvbTog...",
-      "size": 456789,
-      "included": true
-    }
-  }
-}
-```
-
-Notes:
-
-- `bodies.text` contains the `text/plain` part when present.
-- `bodies.html` contains the `text/html` part when present.
-- HTML is forwarded as-is. This service does not sanitize or interpret it.
-- `payload.include_raw_rfc822: true` includes the original RFC822 message as base64.
-- `payload.attachments: metadata` includes attachment filename, content type, and size.
-- `payload.attachments: inline_base64` also includes attachment bytes as base64.
-- `payload.attachments: disabled` omits attachments.
 
 ## Run
 

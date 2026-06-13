@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/yunyingk/mail-forwarder/admin"
 	"github.com/yunyingk/mail-forwarder/config"
 	"github.com/yunyingk/mail-forwarder/mailer"
 	"github.com/yunyingk/mail-forwarder/webhook"
@@ -41,6 +42,7 @@ func main() {
 		slog.String("version", version),
 		slog.Int("imap_sources", len(cfg.IMAP)),
 		slog.Bool("dry_run", cfg.DryRun),
+		slog.Bool("admin_enabled", cfg.Admin.Enabled),
 	)
 
 	sender := webhook.NewSender(10 * time.Second)
@@ -52,6 +54,19 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 
 	var wg sync.WaitGroup
+
+	var adminServer *admin.Server
+	if cfg.Admin.Enabled {
+		adminServer = admin.New(cfg, log)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := adminServer.Run(); err != nil {
+				log.Error("admin server exited with error", slog.Any("error", err))
+				cancel()
+			}
+		}()
+	}
 
 	for _, source := range cfg.IMAP {
 		wg.Add(1)
@@ -83,6 +98,13 @@ func main() {
 	sig := <-sigCh
 	log.Info("received signal, shutting down", slog.String("signal", sig.String()))
 	cancel()
+	if adminServer != nil {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		if err := adminServer.Shutdown(shutdownCtx); err != nil {
+			log.Warn("admin server shutdown failed", slog.Any("error", err))
+		}
+	}
 
 	done := make(chan struct{})
 	go func() {

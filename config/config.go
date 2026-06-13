@@ -46,8 +46,14 @@ type IdleFallbackOpt struct {
 
 type Config struct {
 	IMAP        []IMAPSource `yaml:"imap"`
+	Admin       AdminConfig  `yaml:"admin"`
 	DryRun      bool         `yaml:"dry_run"`
 	PollOnStart bool         `yaml:"poll_on_start"`
+}
+
+type AdminConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Listen  string `yaml:"listen"`
 }
 
 var envVarRe = regexp.MustCompile(`\$\{([^}]+)}`)
@@ -107,6 +113,9 @@ func (c *Config) validate() error {
 }
 
 func (c *Config) defaults() {
+	if c.Admin.Listen == "" {
+		c.Admin.Listen = "127.0.0.1:6245"
+	}
 	for i := range c.IMAP {
 		s := &c.IMAP[i]
 		if s.Port == 0 {
