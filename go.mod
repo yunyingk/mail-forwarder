@@ -1,6 +1,6 @@
 module github.com/yunyingk/mail-forwarder
 
-go 1.26.2
+go 1.23
 
 require (
 	github.com/emersion/go-imap v1.2.1

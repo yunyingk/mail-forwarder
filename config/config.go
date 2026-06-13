@@ -4,26 +4,22 @@ import (
 	"fmt"
 	"os"
 	"regexp"
-	"strings"
 
 	"gopkg.in/yaml.v3"
 )
 
 type IMAPSource struct {
-	Name     string        `yaml:"name"`
-	Host     string        `yaml:"host"`
-	Port     int           `yaml:"port"`
-	Secure   bool          `yaml:"secure"`
-	User     string        `yaml:"user"`
-	Pass     string        `yaml:"pass"`
-	Mailbox  string        `yaml:"mailbox"`
-	Filter   IMAPFilter    `yaml:"filter"`
-	Timeouts IMAPTimeouts  `yaml:"timeouts"`
-}
-
-type IMAPFilter struct {
-	From          string `yaml:"from"`
-	SubjectKeyword string `yaml:"subject_keyword"`
+	Name         string          `yaml:"name"`
+	Host         string          `yaml:"host"`
+	Port         int             `yaml:"port"`
+	Secure       bool            `yaml:"secure"`
+	User         string          `yaml:"user"`
+	Pass         string          `yaml:"pass"`
+	Mailbox      string          `yaml:"mailbox"`
+	Webhook      WebhookConfig   `yaml:"webhook"`
+	Timeouts     IMAPTimeouts    `yaml:"timeouts"`
+	Payload      PayloadConfig   `yaml:"payload"`
+	IdleFallback IdleFallbackOpt `yaml:"idle_fallback"`
 }
 
 type IMAPTimeouts struct {
@@ -31,19 +27,27 @@ type IMAPTimeouts struct {
 	SocketSec     int `yaml:"socket_sec"`
 }
 
-type DingTalkTarget struct {
-	Name    string `yaml:"name"`
-	Webhook string `yaml:"webhook"`
-	Secret  string `yaml:"secret"`
-	Title   string `yaml:"title"`
+type WebhookConfig struct {
+	URL        string            `yaml:"url"`
+	Secret     string            `yaml:"secret"`
+	Headers    map[string]string `yaml:"headers"`
+	TimeoutSec int               `yaml:"timeout_sec"`
+}
+
+type PayloadConfig struct {
+	IncludeRawRFC822 bool   `yaml:"include_raw_rfc822"`
+	Attachments      string `yaml:"attachments"`
+}
+
+type IdleFallbackOpt struct {
+	Allow       bool `yaml:"allow"`
+	IntervalSec int  `yaml:"interval_sec"`
 }
 
 type Config struct {
-	IMAP          []IMAPSource     `yaml:"imap"`
-	DingTalk      []DingTalkTarget `yaml:"dingtalk"`
-	DryRun        bool             `yaml:"dry_run"`
-	MaxTextLength int              `yaml:"max_text_length"`
-	PollOnStart   bool             `yaml:"poll_on_start"`
+	IMAP        []IMAPSource `yaml:"imap"`
+	DryRun      bool         `yaml:"dry_run"`
+	PollOnStart bool         `yaml:"poll_on_start"`
 }
 
 var envVarRe = regexp.MustCompile(`\$\{([^}]+)}`)
@@ -90,22 +94,19 @@ func (c *Config) validate() error {
 		if s.Pass == "" {
 			return fmt.Errorf("config: imap[%d].pass is required", i)
 		}
-	}
-	for i, t := range c.DingTalk {
-		if t.Name == "" {
-			return fmt.Errorf("config: dingtalk[%d].name is required", i)
+		if s.Webhook.URL == "" {
+			return fmt.Errorf("config: imap[%d].webhook.url is required", i)
 		}
-		if t.Webhook == "" {
-			return fmt.Errorf("config: dingtalk[%d].webhook is required", i)
+		switch s.Payload.Attachments {
+		case "", "disabled", "metadata", "inline_base64":
+		default:
+			return fmt.Errorf("config: imap[%d].payload.attachments must be disabled, metadata, or inline_base64", i)
 		}
 	}
 	return nil
 }
 
 func (c *Config) defaults() {
-	if c.MaxTextLength == 0 {
-		c.MaxTextLength = 3200
-	}
 	for i := range c.IMAP {
 		s := &c.IMAP[i]
 		if s.Port == 0 {
@@ -114,14 +115,20 @@ func (c *Config) defaults() {
 		if s.Mailbox == "" {
 			s.Mailbox = "INBOX"
 		}
-		if s.Filter.From != "" {
-			s.Filter.From = strings.ToLower(strings.TrimSpace(s.Filter.From))
-		}
 		if s.Timeouts.ConnectionSec == 0 {
 			s.Timeouts.ConnectionSec = 15
 		}
 		if s.Timeouts.SocketSec == 0 {
 			s.Timeouts.SocketSec = 300
+		}
+		if s.Webhook.TimeoutSec == 0 {
+			s.Webhook.TimeoutSec = 10
+		}
+		if s.Payload.Attachments == "" {
+			s.Payload.Attachments = "disabled"
+		}
+		if s.IdleFallback.IntervalSec == 0 {
+			s.IdleFallback.IntervalSec = 60
 		}
 	}
 }

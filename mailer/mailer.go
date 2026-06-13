@@ -1,8 +1,10 @@
 package mailer
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"log/slog"
@@ -17,27 +19,52 @@ import (
 )
 
 type Mail struct {
-	SourceName string
-	UID        uint32
-	From       string
-	Subject    string
-	Date       time.Time
-	Text       string
-	MessageID  string
+	SourceName        string
+	Mailbox           string
+	UID               uint32
+	From              string
+	To                []string
+	Cc                []string
+	ReplyTo           []string
+	Subject           string
+	Date              time.Time
+	Text              string
+	HTML              string
+	MessageID         string
+	Headers           map[string]string
+	Attachments       []Attachment
+	RawRFC822Base64   string
+	RawRFC822Size     int
+	RawRFC822Included bool
 }
 
-type Handler func(ctx context.Context, mail Mail) error
+type Attachment struct {
+	Filename      string
+	ContentType   string
+	ContentID     string
+	Disposition   string
+	Size          int
+	ContentBase64 string
+}
+
+type HandlerResult struct {
+	MarkSeen bool
+}
+
+type Handler func(ctx context.Context, mail Mail) (HandlerResult, error)
 
 type Listener struct {
-	source  config.IMAPSource
-	handler Handler
-	log     *slog.Logger
+	source      config.IMAPSource
+	handler     Handler
+	pollOnStart bool
+	log         *slog.Logger
 }
 
-func NewListener(source config.IMAPSource, handler Handler, log *slog.Logger) *Listener {
+func NewListener(source config.IMAPSource, handler Handler, pollOnStart bool, log *slog.Logger) *Listener {
 	return &Listener{
-		source:  source,
-		handler: handler,
+		source:      source,
+		handler:     handler,
+		pollOnStart: pollOnStart,
 		log: log.With(
 			slog.String("imap", source.Name),
 			slog.String("host", source.Host),
@@ -102,36 +129,59 @@ func (l *Listener) connectAndListen(ctx context.Context) error {
 		slog.Uint64("messages", uint64(mbox.Messages)),
 	)
 
-	if err := l.processUnread(ctx, c); err != nil {
-		return err
+	if l.pollOnStart {
+		if err := l.processUnread(ctx, c); err != nil {
+			return err
+		}
 	}
 
-	updates := make(chan client.Update, 16)
-	c.Updates = updates
-
-	go l.handleUpdates(ctx, c, updates)
-
-	stop := make(chan struct{})
-	go func() {
-		<-ctx.Done()
-		close(stop)
-	}()
-
-	if err := c.Idle(stop, nil); err != nil {
-		return fmt.Errorf("idle: %w", err)
+	if err := l.listenIdle(ctx, c); err != nil {
+		return err
 	}
 
 	return nil
 }
 
-func (l *Listener) handleUpdates(ctx context.Context, c *client.Client, updates chan client.Update) {
+func (l *Listener) listenIdle(ctx context.Context, c *client.Client) error {
+	updates := make(chan client.Update, 16)
+	c.Updates = updates
+
 	for {
+		stop := make(chan struct{})
+		idleDone := make(chan error, 1)
+		go func() {
+			opts := &client.IdleOptions{PollInterval: -1}
+			if l.source.IdleFallback.Allow {
+				opts.PollInterval = time.Duration(l.source.IdleFallback.IntervalSec) * time.Second
+			}
+			idleDone <- c.Idle(stop, opts)
+		}()
+
+		shouldProcess := false
 		select {
 		case <-ctx.Done():
-			return
-		case <-updates:
+			close(stop)
+			<-idleDone
+			return nil
+		case _, ok := <-updates:
+			close(stop)
+			if err := <-idleDone; err != nil {
+				return fmt.Errorf("idle: %w", err)
+			}
+			if !ok {
+				return fmt.Errorf("imap updates channel closed")
+			}
+			shouldProcess = true
+		case err := <-idleDone:
+			if err != nil {
+				return fmt.Errorf("idle: %w", err)
+			}
+			shouldProcess = true
+		}
+
+		if shouldProcess {
 			if err := l.processUnread(ctx, c); err != nil {
-				l.log.Error("process unread failed", slog.Any("error", err))
+				return err
 			}
 		}
 	}
@@ -141,7 +191,7 @@ func (l *Listener) processUnread(ctx context.Context, c *client.Client) error {
 	criteria := imap.NewSearchCriteria()
 	criteria.WithoutFlags = []string{imap.SeenFlag}
 
-	uids, err := c.Search(criteria)
+	uids, err := c.UidSearch(criteria)
 	if err != nil {
 		return fmt.Errorf("search: %w", err)
 	}
@@ -160,6 +210,7 @@ func (l *Listener) processUnread(ctx context.Context, c *client.Client) error {
 			l.log.Error("process message failed", slog.Uint64("uid", uint64(uid)), slog.Any("error", err))
 		}
 	}
+
 	return nil
 }
 
@@ -172,7 +223,7 @@ func (l *Listener) processOne(ctx context.Context, c *client.Client, uid uint32)
 
 	done := make(chan error, 1)
 	go func() {
-		done <- c.Fetch(seqSet, []imap.FetchItem{imap.FetchEnvelope, section.FetchItem()}, messages)
+		done <- c.UidFetch(seqSet, []imap.FetchItem{imap.FetchEnvelope, section.FetchItem()}, messages)
 	}()
 
 	msg := <-messages
@@ -187,34 +238,52 @@ func (l *Listener) processOne(ctx context.Context, c *client.Client, uid uint32)
 	env := msg.Envelope
 	from := firstAddress(env.From)
 
-	if l.source.Filter.From != "" && !strings.EqualFold(from, l.source.Filter.From) {
-		return nil
-	}
-
 	subject := env.Subject
-	if l.source.Filter.SubjectKeyword != "" && !strings.Contains(subject, l.source.Filter.SubjectKeyword) {
-		return nil
-	}
 
 	r := msg.GetBody(section)
 	if r == nil {
 		return fmt.Errorf("no body for uid %d", uid)
 	}
 
-	text, messageID, date := parseMail(r, env)
+	raw, err := io.ReadAll(r)
+	if err != nil {
+		return fmt.Errorf("read body uid %d: %w", uid, err)
+	}
+	parsed := parseMail(bytes.NewReader(raw), env, l.source.Payload.Attachments)
 
 	m := Mail{
-		SourceName: l.source.Name,
-		UID:        uid,
-		From:       from,
-		Subject:    subject,
-		Date:       date,
-		Text:       text,
-		MessageID:  messageID,
+		SourceName:        l.source.Name,
+		Mailbox:           l.source.Mailbox,
+		UID:               uid,
+		From:              from,
+		To:                addresses(env.To),
+		Cc:                addresses(env.Cc),
+		ReplyTo:           addresses(env.ReplyTo),
+		Subject:           subject,
+		Date:              parsed.Date,
+		Text:              parsed.Text,
+		HTML:              parsed.HTML,
+		MessageID:         parsed.MessageID,
+		Headers:           parsed.Headers,
+		Attachments:       parsed.Attachments,
+		RawRFC822Size:     len(raw),
+		RawRFC822Included: l.source.Payload.IncludeRawRFC822,
+	}
+	if l.source.Payload.IncludeRawRFC822 {
+		m.RawRFC822Base64 = base64.StdEncoding.EncodeToString(raw)
 	}
 
-	if err := l.handler(ctx, m); err != nil {
+	result, err := l.handler(ctx, m)
+	if err != nil {
 		return err
+	}
+	if !result.MarkSeen {
+		l.log.Info("forwarded without marking seen",
+			slog.Uint64("uid", uint64(uid)),
+			slog.String("from", from),
+			slog.String("subject", subject),
+		)
+		return nil
 	}
 
 	if err := l.markSeen(c, uid); err != nil {
@@ -233,26 +302,48 @@ func (l *Listener) markSeen(c *client.Client, uid uint32) error {
 	seqSet := new(imap.SeqSet)
 	seqSet.AddNum(uid)
 	item := imap.FormatFlagsOp(imap.AddFlags, true)
-	return c.Store(seqSet, item, []interface{}{imap.SeenFlag}, nil)
+	return c.UidStore(seqSet, item, []interface{}{imap.SeenFlag}, nil)
 }
 
-func parseMail(r io.Reader, env *imap.Envelope) (text string, messageID string, date time.Time) {
-	date = env.Date
+type parsedMail struct {
+	Text        string
+	HTML        string
+	MessageID   string
+	Date        time.Time
+	Headers     map[string]string
+	Attachments []Attachment
+}
+
+func parseMail(r io.Reader, env *imap.Envelope, attachmentMode string) parsedMail {
+	parsed := parsedMail{
+		Date:      env.Date,
+		MessageID: env.MessageId,
+		Headers:   make(map[string]string),
+	}
 
 	entity, err := mail.CreateReader(r)
 	if err != nil {
-		text = ""
-		messageID = env.MessageId
-		return
+		return parsed
 	}
 
-	messageID = entity.Header.Get("Message-Id")
-	if messageID == "" {
-		messageID = env.MessageId
+	for _, key := range []string{
+		"Message-Id",
+		"Return-Path",
+		"Authentication-Results",
+		"DKIM-Signature",
+		"Content-Type",
+		"MIME-Version",
+	} {
+		if value := entity.Header.Get(key); value != "" {
+			parsed.Headers[strings.ToLower(key)] = value
+		}
 	}
 
+	if messageID := entity.Header.Get("Message-Id"); messageID != "" {
+		parsed.MessageID = messageID
+	}
 	if d, err := entity.Header.Date(); err == nil {
-		date = d
+		parsed.Date = d
 	}
 
 	for {
@@ -266,63 +357,38 @@ func parseMail(r io.Reader, env *imap.Envelope) (text string, messageID string, 
 			ct, _, _ := h.ContentType()
 			if strings.HasPrefix(ct, "text/plain") {
 				body, _ := io.ReadAll(p.Body)
-				text = string(body)
-				return
+				if parsed.Text == "" {
+					parsed.Text = string(body)
+				}
 			}
-			if strings.HasPrefix(ct, "text/html") && text == "" {
+			if strings.HasPrefix(ct, "text/html") {
 				body, _ := io.ReadAll(p.Body)
-				text = htmlToText(string(body))
+				if parsed.HTML == "" {
+					parsed.HTML = string(body)
+				}
+			}
+		case *mail.AttachmentHeader:
+			attachment := Attachment{
+				ContentID:   h.Get("Content-Id"),
+				Disposition: h.Get("Content-Disposition"),
+			}
+			if filename, err := h.Filename(); err == nil {
+				attachment.Filename = filename
+			}
+			if ct, _, err := h.ContentType(); err == nil {
+				attachment.ContentType = ct
+			}
+			body, _ := io.ReadAll(p.Body)
+			attachment.Size = len(body)
+			if attachmentMode == "inline_base64" {
+				attachment.ContentBase64 = base64.StdEncoding.EncodeToString(body)
+			}
+			if attachmentMode == "metadata" || attachmentMode == "inline_base64" {
+				parsed.Attachments = append(parsed.Attachments, attachment)
 			}
 		}
 	}
-	return
-}
-
-func htmlToText(html string) string {
-	s := html
-	for _, tag := range []string{"style", "script"} {
-		for {
-			start := strings.Index(strings.ToLower(s), "<"+tag)
-			if start == -1 {
-				break
-			}
-			end := strings.Index(strings.ToLower(s[start:]), "</"+tag+">")
-			if end == -1 {
-				break
-			}
-			s = s[:start] + s[start+end+len(tag)+3:]
-		}
-	}
-
-	var b strings.Builder
-	inTag := false
-	for _, r := range s {
-		switch {
-		case r == '<':
-			inTag = true
-		case r == '>':
-			inTag = false
-		case !inTag:
-			b.WriteRune(r)
-		}
-	}
-
-	result := b.String()
-	result = strings.ReplaceAll(result, "&nbsp;", " ")
-	result = strings.ReplaceAll(result, "&amp;", "&")
-	result = strings.ReplaceAll(result, "&lt;", "<")
-	result = strings.ReplaceAll(result, "&gt;", ">")
-	result = strings.ReplaceAll(result, "&quot;", "\"")
-
-	lines := strings.Split(result, "\n")
-	var filtered []string
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line != "" {
-			filtered = append(filtered, line)
-		}
-	}
-	return strings.Join(filtered, "\n")
+	return parsed
 }
 
 func firstAddress(addrs []*imap.Address) string {
@@ -338,4 +404,15 @@ func firstAddress(addrs []*imap.Address) string {
 		return ""
 	}
 	return strings.ToLower(mailbox + "@" + a.HostName)
+}
+
+func addresses(addrs []*imap.Address) []string {
+	result := make([]string, 0, len(addrs))
+	for _, a := range addrs {
+		if a == nil || a.HostName == "" || a.MailboxName == "" {
+			continue
+		}
+		result = append(result, strings.ToLower(a.MailboxName+"@"+a.HostName))
+	}
+	return result
 }

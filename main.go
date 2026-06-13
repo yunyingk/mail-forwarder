@@ -11,9 +11,8 @@ import (
 	"time"
 
 	"github.com/yunyingk/mail-forwarder/config"
-	"github.com/yunyingk/mail-forwarder/dingtalk"
 	"github.com/yunyingk/mail-forwarder/mailer"
-	"github.com/yunyingk/mail-forwarder/router"
+	"github.com/yunyingk/mail-forwarder/webhook"
 )
 
 var version = "dev"
@@ -41,12 +40,10 @@ func main() {
 	log.Info("starting mail-forwarder",
 		slog.String("version", version),
 		slog.Int("imap_sources", len(cfg.IMAP)),
-		slog.Int("dingtalk_targets", len(cfg.DingTalk)),
 		slog.Bool("dry_run", cfg.DryRun),
 	)
 
-	sender := dingtalk.NewSender(cfg.DingTalk, 10*time.Second)
-	dispatcher := router.NewDispatcher(sender, cfg.MaxTextLength, cfg.DryRun, log)
+	sender := webhook.NewSender(10 * time.Second)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -60,7 +57,23 @@ func main() {
 		wg.Add(1)
 		go func(s config.IMAPSource) {
 			defer wg.Done()
-			l := mailer.NewListener(s, dispatcher.Handle, log)
+			handler := func(ctx context.Context, mail mailer.Mail) (mailer.HandlerResult, error) {
+				if cfg.DryRun {
+					log.Info("dry-run: would post mail to webhook",
+						slog.String("imap", s.Name),
+						slog.String("webhook", s.Webhook.URL),
+						slog.Uint64("uid", uint64(mail.UID)),
+						slog.String("from", mail.From),
+						slog.String("subject", mail.Subject),
+					)
+					return mailer.HandlerResult{MarkSeen: false}, nil
+				}
+				if err := sender.Send(ctx, s.Webhook, mail); err != nil {
+					return mailer.HandlerResult{}, err
+				}
+				return mailer.HandlerResult{MarkSeen: true}, nil
+			}
+			l := mailer.NewListener(s, handler, cfg.PollOnStart, log)
 			if err := l.Run(ctx); err != nil {
 				log.Error("listener exited with error", slog.String("imap", s.Name), slog.Any("error", err))
 			}

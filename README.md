@@ -1,22 +1,31 @@
 # mail-forwarder
 
-监听 IMAP 未读邮件，按条件转发到钉钉群机器人。Go 重写版，支持多邮箱源、多钉钉机器人、条件路由。
+`mail-forwarder` is a small IMAP-to-HTTP ingress service.
 
-## 功能
+It connects to one or more IMAP mailboxes, listens for unread mail with IMAP
+IDLE, converts each message into a JSON payload, and posts it to the webhook
+configured for that mailbox.
 
-- 支持多个 IMAP 邮箱源同时监听
-- 支持多个钉钉机器人，按条件路由
-- IMAP IDLE 实时推送 + 启动时轮询
-- 发送失败保持未读，下次重试
-- 结构化 JSON 日志
-- 跨平台二进制：Linux / macOS / Windows
-- Docker 部署
+It does not run business rules, parse HTML into text, or route messages by
+sender or keyword. Downstream HTTP agents should do that work.
 
-## 安装
+## Features
 
-### 二进制
+- Multiple IMAP mailbox sources
+- One HTTP webhook per mailbox source
+- IMAP IDLE long-lived listening
+- Startup backlog processing for unread messages
+- Success acknowledgement: mark mail as seen only after webhook returns 2xx
+- Failure retry: keep mail unread when webhook fails, times out, or returns non-2xx
+- Structured JSON logs
+- Cross-platform Go binary: Linux / macOS / Windows
+- Docker deployment
 
-从 [Releases](../../releases) 下载对应平台的二进制文件。
+## Install
+
+### Binary
+
+Download a release binary for your platform.
 
 ### Docker
 
@@ -25,19 +34,19 @@ docker compose pull
 docker compose up -d
 ```
 
-### 本地编译
+### Build Locally
 
 ```bash
 go build -ldflags="-s -w -X main.version=$(git describe --tags --always)" -o mail-forwarder .
 ```
 
-## 配置
+## Configuration
 
 ```bash
 cp config.example.yaml config.yaml
 ```
 
-编辑 `config.yaml`，配置 IMAP 源和钉钉机器人：
+Example:
 
 ```yaml
 imap:
@@ -46,87 +55,169 @@ imap:
     port: 993
     secure: true
     user: alert@example.com
-    pass: your_password
+    pass: your_imap_password
     mailbox: INBOX
-    filter:
-      from: email@service.ekuaibao.biz
-      subject_keyword: "合思工作流失败提醒"
-
-dingtalk:
-  - name: hesi-robot
-    webhook: https://oapi.dingtalk.com/robot/send?access_token=xxx
-    secret: ""
-    title: "合思工作流失败提醒"
+    webhook:
+      url: https://example.com/mail-ingress
+      secret: your_webhook_secret
+      timeout_sec: 10
+      headers:
+        X-Agent-Name: mail-forwarder
+    payload:
+      include_raw_rfc822: false
+      attachments: disabled # disabled, metadata, inline_base64
+    idle_fallback:
+      allow: false
+      interval_sec: 60
+    timeouts:
+      connection_sec: 15
+      socket_sec: 300
 
 dry_run: false
-max_text_length: 3200
+poll_on_start: true
 ```
 
-### 环境变量引用
-
-配置文件中可用 `${VAR_NAME}` 引用环境变量：
+Environment variables can be referenced in config values:
 
 ```yaml
 pass: ${IMAP_PASS}
 ```
 
-### 路由逻辑
+## Delivery Semantics
 
-编辑 `router/router.go` 中的 `Route` 函数来自定义路由逻辑：
+For every configured mailbox:
 
-```go
-func Route(mail mailer.Mail, availableTargets []string) Result {
-    // 按 from/subject/内容 判断发给哪些机器人
-    return Result{Targets: availableTargets}
+1. On startup, unread messages are processed when `poll_on_start: true`.
+2. The service enters IMAP IDLE and waits for mailbox updates.
+3. When unread mail is found, messages are processed by UID in order.
+4. The webhook is called once per message.
+5. If the webhook returns HTTP 2xx, the message is marked as seen.
+6. If the webhook fails, times out, or returns non-2xx, the message remains unread.
+
+This means disconnects and webhook failures are retried after reconnect or the
+next mailbox update. If ten unread messages accumulate while the service is
+offline, all ten are delivered after reconnect.
+
+`dry_run: true` logs the webhook delivery that would happen and does not mark
+messages as seen.
+
+If `idle_fallback.allow: false`, mailboxes that do not support IMAP IDLE fail
+and reconnect instead of falling back to polling. Set `idle_fallback.allow: true`
+to let `go-imap` use periodic NOOP polling with `idle_fallback.interval_sec`.
+
+## Webhook API
+
+`mail-forwarder` sends an HTTP `POST` request to the configured webhook URL.
+
+Headers:
+
+```http
+Content-Type: application/json
+User-Agent: mail-forwarder
+X-Mail-Forwarder-Timestamp: 1718265600
+X-Mail-Forwarder-Signature: sha256=<hex-hmac>
+```
+
+`X-Mail-Forwarder-Timestamp` and `X-Mail-Forwarder-Signature` are sent only
+when `webhook.secret` is configured.
+
+Signature input:
+
+```text
+<unix_timestamp>.<raw_request_body>
+```
+
+Signature algorithm:
+
+```text
+HMAC-SHA256(secret, input)
+```
+
+### Request Body
+
+```json
+{
+  "source": {
+    "name": "hesi-mailbox",
+    "mailbox": "INBOX"
+  },
+  "message": {
+    "uid": 12345,
+    "message_id": "<message-id@example.com>",
+    "date": "2026-06-13T12:30:00+08:00",
+    "subject": "Example subject",
+    "from": "notice@example.com",
+    "to": ["alert@example.com"],
+    "cc": [],
+    "reply_to": [],
+    "headers": {
+      "message-id": "<message-id@example.com>",
+      "return-path": "<notice@example.com>",
+      "authentication-results": "..."
+    },
+    "bodies": {
+      "text": "plain text body",
+      "html": "<html><body>html body</body></html>"
+    },
+    "attachments": [
+      {
+        "filename": "invoice.pdf",
+        "content_type": "application/pdf",
+        "content_id": "",
+        "disposition": "attachment; filename=\"invoice.pdf\"",
+        "size": 123456,
+        "content_base64": "JVBERi0x..."
+      }
+    ],
+    "raw": {
+      "rfc822_base64": "RnJvbTog...",
+      "size": 456789,
+      "included": true
+    }
+  }
 }
 ```
 
-## 运行
+Notes:
+
+- `bodies.text` contains the `text/plain` part when present.
+- `bodies.html` contains the `text/html` part when present.
+- HTML is forwarded as-is. This service does not sanitize or interpret it.
+- `payload.include_raw_rfc822: true` includes the original RFC822 message as base64.
+- `payload.attachments: metadata` includes attachment filename, content type, and size.
+- `payload.attachments: inline_base64` also includes attachment bytes as base64.
+- `payload.attachments: disabled` omits attachments.
+
+## Run
 
 ```bash
-# 直接运行
 ./mail-forwarder -config config.yaml
+```
 
-# Dry run（不发钉钉，不标记已读）
-# 在 config.yaml 中设置 dry_run: true
+Docker:
 
-# Docker
+```bash
 docker compose up -d
 docker logs -f mail-forwarder
 ```
 
-## 项目结构
+## Project Structure
 
+```text
+main.go              # entrypoint and graceful shutdown
+config/              # YAML config loading
+mailer/              # IMAP connection, IDLE listening, message extraction
+webhook/             # HTTP webhook payload, signing, delivery
+config.example.yaml  # config template
 ```
-main.go              # 入口，组装 + 优雅退出
-config/              # YAML 配置加载
-mailer/              # IMAP 连接、idle、邮件获取
-dingtalk/            # 钉钉 webhook 签名 + 发送
-router/              # ★ 路由逻辑（改这个文件）
-config.example.yaml  # 配置模板
-```
 
-## GitHub Actions
+## Release Artifacts
 
-推送到 `main` 或打 tag 时自动构建：
+The release workflow builds:
 
-- **tag (`v*`)**：构建三平台二进制 + Docker 镜像，创建 GitHub Release
-- **main**：构建 Docker 镜像
-
-产物：
-
-| 平台 | 文件名 |
-|------|--------|
+| Platform | File |
+| --- | --- |
 | Linux amd64 | `mail-forwarder-linux-amd64` |
 | macOS amd64 | `mail-forwarder-darwin-amd64` |
 | macOS arm64 | `mail-forwarder-darwin-arm64` |
 | Windows amd64 | `mail-forwarder-windows-amd64.exe` |
-
-## 从 Node.js 版迁移
-
-v0.2.0 是 Go 重写版，主要变化：
-
-- 配置从 `.env` 改为 `config.yaml`（支持多源、多目标）
-- 二进制分发，不再需要 Node 运行时
-- 内存占用从 ~20MB 降至 ~2-3MB
-- 结构化 JSON 日志
