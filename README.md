@@ -2,9 +2,9 @@
 
 `mail-forwarder` is a small IMAP-to-HTTP ingress service.
 
-It connects to one or more IMAP mailboxes, listens for unread mail with IMAP
-IDLE, converts each message into a JSON payload, and posts it to the webhook
-configured for that mailbox.
+It connects to configured IMAP mailbox folders, listens with IMAP IDLE, converts
+unread mail into JSON, and posts each message to the webhook configured for that
+mailbox source.
 
 It does not run business rules, parse HTML into text, or route messages by
 sender or keyword. Downstream HTTP agents should do that work.
@@ -14,27 +14,23 @@ sender or keyword. Downstream HTTP agents should do that work.
 - Multiple IMAP mailbox sources
 - One HTTP webhook per mailbox source
 - IMAP IDLE long-lived listening
-- Startup backlog processing for unread messages
+- Explicit mail processing modes
+- Persistent state for checkpoint modes and webhook retry cooldown
 - Success acknowledgement: mark mail as seen only after webhook returns 2xx
-- Failure retry: keep mail unread when webhook fails, times out, or returns non-2xx
 - Structured JSON logs
-- Cross-platform Go binary: Linux / macOS / Windows
-- Docker deployment
+- Optional local read-only admin API
+- Cross-platform Go binary and Docker image
 
 ## Install
 
-### Binary
-
-Download a release binary for your platform.
-
-### Docker
+Download a release binary for your platform, or run with Docker:
 
 ```bash
 docker compose pull
 docker compose up -d
 ```
 
-### Build Locally
+Build locally:
 
 ```bash
 go build -ldflags="-s -w -X main.version=$(git describe --tags --always)" -o mail-forwarder .
@@ -42,77 +38,47 @@ go build -ldflags="-s -w -X main.version=$(git describe --tags --always)" -o mai
 
 ## Configuration
 
+Generate a starter config:
+
 ```bash
-cp config.example.yaml config.yaml
+mail-forwarder init-config
 ```
 
-Example:
+This writes `config.yaml` in the current directory. If the file already exists,
+it refuses to overwrite it. Use `-output` to choose another path:
 
-```yaml
-imap:
-  - name: hesi-mailbox
-    host: imap.exmail.qq.com
-    port: 993
-    secure: true
-    user: alert@example.com
-    pass: your_imap_password
-    mailbox: INBOX
-    webhook:
-      url: https://example.com/mail-ingress
-      secret: your_webhook_secret
-      timeout_sec: 10
-      headers:
-        X-Agent-Name: mail-forwarder
-    payload:
-      include_raw_rfc822: false
-      attachments: disabled # disabled, metadata, inline_base64
-    idle_fallback:
-      allow: false
-      interval_sec: 60
-    timeouts:
-      connection_sec: 15
-      socket_sec: 300
-
-dry_run: false
-poll_on_start: true
-
-admin:
-  enabled: false
-  listen: 127.0.0.1:6245
+```bash
+mail-forwarder init-config -output config.yaml
 ```
 
-Environment variables can be referenced in config values:
+The starter config uses placeholder IMAP credentials and `dry_run: true`. Edit
+the config before production use.
 
-```yaml
-pass: ${IMAP_PASS}
+Run:
+
+```bash
+mail-forwarder -config config.yaml
 ```
+
+If `config.yaml` is missing, the program exits and tells you to run
+`mail-forwarder init-config`.
+
+## Processing Modes
+
+`processing_mode` is required. Choose one:
+
+- `unread_queue`
+- `new_unread_queue`
+- `checkpoint_from_now`
+- `checkpoint_from_unread`
+
+See [docs/processing-modes.md](docs/processing-modes.md) for exact behavior,
+state semantics, and retry cooldown rules.
 
 Recommended setup: create a dedicated mailbox folder and use mail-provider
 rules to move target messages into that folder. Configure `mailbox` to watch
 that folder. mail-forwarder only searches the configured mailbox, not the whole
 email account.
-
-## Delivery Semantics
-
-For every configured mailbox:
-
-1. On startup, unread messages are processed when `poll_on_start: true`.
-2. The service enters IMAP IDLE and waits for mailbox updates.
-3. When unread mail is found, messages are processed by UID in order.
-4. The webhook is called once per message.
-5. If the webhook returns HTTP 2xx, the message is marked as seen.
-6. If the webhook fails, times out, or returns non-2xx, the message remains unread.
-
-This means disconnects and webhook failures are retried after reconnect or the
-next mailbox update. If ten unread messages accumulate while the service is
-offline, all ten are delivered after reconnect.
-
-`dry_run: true` logs the webhook delivery that would happen and does not mark
-messages as seen.
-
-If `idle_fallback.allow: false`, mailboxes that do not support IMAP IDLE fail
-and reconnect instead of falling back to polling. Set `idle_fallback.allow: true`
-to let `go-imap` use periodic NOOP polling with `idle_fallback.interval_sec`.
 
 ## Webhook API
 
@@ -149,27 +115,17 @@ Tools that import OpenAPI by URL can use:
 http://127.0.0.1:6245/openapi.json
 ```
 
-## Run
-
-```bash
-./mail-forwarder -config config.yaml
-```
-
-Docker:
-
-```bash
-docker compose up -d
-docker logs -f mail-forwarder
-```
-
 ## Project Structure
 
 ```text
 main.go              # entrypoint and graceful shutdown
-config/              # YAML config loading
+config/              # YAML config loading and starter template
 mailer/              # IMAP connection, IDLE listening, message extraction
+state/               # JSON state file for checkpoints and retry cooldown
 webhook/             # HTTP webhook payload, signing, delivery
-config.example.yaml  # config template
+api/openapi.yaml     # OpenAPI source
+admin/openapi.json   # generated OpenAPI JSON served by admin API
+config.example.yaml  # starter config template
 ```
 
 ## Release Artifacts

@@ -102,10 +102,12 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 type RedactedConfig struct {
-	IMAP        []RedactedIMAPSource `json:"imap"`
-	Admin       config.AdminConfig   `json:"admin"`
-	DryRun      bool                 `json:"dry_run"`
-	PollOnStart bool                 `json:"poll_on_start"`
+	IMAP           []RedactedIMAPSource `json:"imap"`
+	Admin          config.AdminConfig   `json:"admin"`
+	ProcessingMode string               `json:"processing_mode"`
+	State          config.StateConfig   `json:"state"`
+	Retry          config.RetryConfig   `json:"retry"`
+	DryRun         bool                 `json:"dry_run"`
 }
 
 type RedactedIMAPSource struct {
@@ -131,10 +133,12 @@ type RedactedWebhookConfig struct {
 
 func RedactConfig(cfg *config.Config) RedactedConfig {
 	result := RedactedConfig{
-		Admin:       cfg.Admin,
-		DryRun:      cfg.DryRun,
-		PollOnStart: cfg.PollOnStart,
-		IMAP:        make([]RedactedIMAPSource, 0, len(cfg.IMAP)),
+		Admin:          cfg.Admin,
+		ProcessingMode: cfg.ProcessingMode,
+		State:          cfg.State,
+		Retry:          cfg.Retry,
+		DryRun:         cfg.DryRun,
+		IMAP:           make([]RedactedIMAPSource, 0, len(cfg.IMAP)),
 	}
 	for _, item := range cfg.IMAP {
 		result.IMAP = append(result.IMAP, RedactedIMAPSource{

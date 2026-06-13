@@ -1,4 +1,6 @@
-# mail-forwarder starter config
+package config
+
+const StarterConfig = `# mail-forwarder starter config
 # Fill in real IMAP credentials and webhook URL before setting dry_run to false.
 
 processing_mode: checkpoint_from_now
@@ -43,3 +45,4 @@ admin:
   listen: 127.0.0.1:6245
 
 dry_run: true
+`

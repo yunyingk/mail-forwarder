@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -45,15 +46,46 @@ type IdleFallbackOpt struct {
 }
 
 type Config struct {
-	IMAP        []IMAPSource `yaml:"imap"`
-	Admin       AdminConfig  `yaml:"admin"`
-	DryRun      bool         `yaml:"dry_run"`
-	PollOnStart bool         `yaml:"poll_on_start"`
+	IMAP           []IMAPSource `yaml:"imap"`
+	Admin          AdminConfig  `yaml:"admin"`
+	ProcessingMode string       `yaml:"processing_mode"`
+	State          StateConfig  `yaml:"state"`
+	Retry          RetryConfig  `yaml:"retry"`
+	DryRun         bool         `yaml:"dry_run"`
 }
 
 type AdminConfig struct {
 	Enabled bool   `yaml:"enabled"`
 	Listen  string `yaml:"listen"`
+}
+
+type StateConfig struct {
+	Path string `yaml:"path"`
+}
+
+type RetryConfig struct {
+	Backoff []Duration `yaml:"backoff"`
+}
+
+type Duration struct {
+	time.Duration
+}
+
+func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
+	var s string
+	if err := value.Decode(&s); err != nil {
+		return err
+	}
+	parsed, err := time.ParseDuration(s)
+	if err != nil {
+		return err
+	}
+	d.Duration = parsed
+	return nil
+}
+
+func (d Duration) MarshalYAML() (interface{}, error) {
+	return d.String(), nil
 }
 
 var envVarRe = regexp.MustCompile(`\$\{([^}]+)}`)
@@ -90,6 +122,16 @@ func (c *Config) validate() error {
 	if len(c.IMAP) == 0 {
 		return fmt.Errorf("config: at least one imap source is required")
 	}
+	switch c.ProcessingMode {
+	case "unread_queue", "new_unread_queue", "checkpoint_from_now", "checkpoint_from_unread":
+	case "":
+		return fmt.Errorf("config: processing_mode is required; choose one of unread_queue, new_unread_queue, checkpoint_from_now, checkpoint_from_unread")
+	default:
+		return fmt.Errorf("config: processing_mode %q is invalid; choose one of unread_queue, new_unread_queue, checkpoint_from_now, checkpoint_from_unread", c.ProcessingMode)
+	}
+	if c.State.Path == "" {
+		return fmt.Errorf("config: state.path is required")
+	}
 	for i, s := range c.IMAP {
 		if s.Host == "" {
 			return fmt.Errorf("config: imap[%d].host is required", i)
@@ -115,6 +157,15 @@ func (c *Config) validate() error {
 func (c *Config) defaults() {
 	if c.Admin.Listen == "" {
 		c.Admin.Listen = "127.0.0.1:6245"
+	}
+	if len(c.Retry.Backoff) == 0 {
+		c.Retry.Backoff = []Duration{
+			{Duration: 5 * time.Minute},
+			{Duration: 30 * time.Minute},
+			{Duration: 2 * time.Hour},
+			{Duration: 6 * time.Hour},
+			{Duration: 24 * time.Hour},
+		}
 	}
 	for i := range c.IMAP {
 		s := &c.IMAP[i]

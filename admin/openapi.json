@@ -231,15 +231,29 @@
             },
             "type": "array"
           },
-          "poll_on_start": {
-            "type": "boolean"
+          "processing_mode": {
+            "enum": [
+              "unread_queue",
+              "new_unread_queue",
+              "checkpoint_from_now",
+              "checkpoint_from_unread"
+            ],
+            "type": "string"
+          },
+          "retry": {
+            "$ref": "#/components/schemas/RetryConfig"
+          },
+          "state": {
+            "$ref": "#/components/schemas/StateConfig"
           }
         },
         "required": [
           "imap",
           "admin",
-          "dry_run",
-          "poll_on_start"
+          "processing_mode",
+          "state",
+          "retry",
+          "dry_run"
         ],
         "type": "object"
       },
@@ -318,6 +332,18 @@
         ],
         "type": "object"
       },
+      "RetryConfig": {
+        "properties": {
+          "backoff": {
+            "items": {
+              "example": "5m",
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
       "SourceSummary": {
         "properties": {
           "host": {
@@ -350,6 +376,17 @@
           "user",
           "mailbox",
           "webhook_url"
+        ],
+        "type": "object"
+      },
+      "StateConfig": {
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
         ],
         "type": "object"
       }

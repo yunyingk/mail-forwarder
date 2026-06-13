@@ -138,7 +138,7 @@ components:
           type: string
     RedactedConfig:
       type: object
-      required: [imap, admin, dry_run, poll_on_start]
+      required: [imap, admin, processing_mode, state, retry, dry_run]
       properties:
         imap:
           type: array
@@ -146,9 +146,14 @@ components:
             $ref: "#/components/schemas/RedactedIMAPSource"
         admin:
           $ref: "#/components/schemas/AdminConfig"
+        processing_mode:
+          type: string
+          enum: [unread_queue, new_unread_queue, checkpoint_from_now, checkpoint_from_unread]
+        state:
+          $ref: "#/components/schemas/StateConfig"
+        retry:
+          $ref: "#/components/schemas/RetryConfig"
         dry_run:
-          type: boolean
-        poll_on_start:
           type: boolean
     RedactedIMAPSource:
       type: object
@@ -221,6 +226,20 @@ components:
           type: boolean
         listen:
           type: string
+    StateConfig:
+      type: object
+      required: [path]
+      properties:
+        path:
+          type: string
+    RetryConfig:
+      type: object
+      properties:
+        backoff:
+          type: array
+          items:
+            type: string
+            example: 5m
     MailWebhookPayload:
       type: object
       required: [source, message]

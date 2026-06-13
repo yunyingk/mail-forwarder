@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -13,15 +15,22 @@ import (
 	"github.com/yunyingk/mail-forwarder/admin"
 	"github.com/yunyingk/mail-forwarder/config"
 	"github.com/yunyingk/mail-forwarder/mailer"
+	statepkg "github.com/yunyingk/mail-forwarder/state"
 	"github.com/yunyingk/mail-forwarder/webhook"
 )
 
 var version = "dev"
 
 func main() {
-	configPath := flag.String("config", "config.yaml", "path to config file")
-	showVersion := flag.Bool("version", false, "print version and exit")
-	flag.Parse()
+	if len(os.Args) > 1 && os.Args[1] == "init-config" {
+		initConfig(os.Args[2:])
+		return
+	}
+
+	flags := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
+	configPath := flags.String("config", "config.yaml", "path to config file")
+	showVersion := flags.Bool("version", false, "print version and exit")
+	flags.Parse(os.Args[1:])
 
 	if *showVersion {
 		os.Stdout.WriteString("mail-forwarder " + version + "\n")
@@ -34,6 +43,13 @@ func main() {
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			log.Error("config file not found",
+				slog.String("path", *configPath),
+				slog.String("hint", "run: mail-forwarder init-config"),
+			)
+			os.Exit(1)
+		}
 		log.Error("load config failed", slog.Any("error", err))
 		os.Exit(1)
 	}
@@ -41,11 +57,21 @@ func main() {
 	log.Info("starting mail-forwarder",
 		slog.String("version", version),
 		slog.Int("imap_sources", len(cfg.IMAP)),
+		slog.String("processing_mode", cfg.ProcessingMode),
 		slog.Bool("dry_run", cfg.DryRun),
 		slog.Bool("admin_enabled", cfg.Admin.Enabled),
 	)
 
 	sender := webhook.NewSender(10 * time.Second)
+	store, err := statepkg.Open(cfg.State.Path)
+	if err != nil {
+		log.Error("open state failed", slog.Any("error", err))
+		os.Exit(1)
+	}
+	backoff := make([]time.Duration, 0, len(cfg.Retry.Backoff))
+	for _, d := range cfg.Retry.Backoff {
+		backoff = append(backoff, d.Duration)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -88,7 +114,7 @@ func main() {
 				}
 				return mailer.HandlerResult{MarkSeen: true}, nil
 			}
-			l := mailer.NewListener(s, handler, cfg.PollOnStart, log)
+			l := mailer.NewListener(s, handler, cfg.ProcessingMode, store, backoff, log)
 			if err := l.Run(ctx); err != nil {
 				log.Error("listener exited with error", slog.String("imap", s.Name), slog.Any("error", err))
 			}
@@ -118,4 +144,29 @@ func main() {
 	case <-time.After(15 * time.Second):
 		log.Warn("shutdown timed out after 15s")
 	}
+}
+
+func initConfig(args []string) {
+	flags := flag.NewFlagSet("init-config", flag.ExitOnError)
+	output := flags.String("output", "config.yaml", "path to write starter config")
+	force := flags.Bool("force", false, "overwrite existing config")
+	flags.Parse(args)
+
+	if !*force {
+		if _, err := os.Stat(*output); err == nil {
+			fmt.Fprintf(os.Stderr, "%s already exists; refusing to overwrite\n", *output)
+			os.Exit(1)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintf(os.Stderr, "check output: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
+	if err := os.WriteFile(*output, []byte(config.StarterConfig), 0600); err != nil {
+		fmt.Fprintf(os.Stderr, "write config: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Fprintf(os.Stdout, "created %s\n", *output)
+	fmt.Fprintln(os.Stdout, "edit it, then run: mail-forwarder -config "+*output)
 }

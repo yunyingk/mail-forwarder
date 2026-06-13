@@ -16,6 +16,7 @@ import (
 	"github.com/emersion/go-imap/client"
 	"github.com/emersion/go-message/mail"
 	"github.com/yunyingk/mail-forwarder/config"
+	statepkg "github.com/yunyingk/mail-forwarder/state"
 )
 
 type Mail struct {
@@ -54,17 +55,23 @@ type HandlerResult struct {
 type Handler func(ctx context.Context, mail Mail) (HandlerResult, error)
 
 type Listener struct {
-	source      config.IMAPSource
-	handler     Handler
-	pollOnStart bool
-	log         *slog.Logger
+	source         config.IMAPSource
+	handler        Handler
+	processingMode string
+	store          *statepkg.Store
+	backoff        []time.Duration
+	log            *slog.Logger
+	uidValidity    uint32
+	minUID         uint32
 }
 
-func NewListener(source config.IMAPSource, handler Handler, pollOnStart bool, log *slog.Logger) *Listener {
+func NewListener(source config.IMAPSource, handler Handler, processingMode string, store *statepkg.Store, backoff []time.Duration, log *slog.Logger) *Listener {
 	return &Listener{
-		source:      source,
-		handler:     handler,
-		pollOnStart: pollOnStart,
+		source:         source,
+		handler:        handler,
+		processingMode: processingMode,
+		store:          store,
+		backoff:        backoff,
 		log: log.With(
 			slog.String("imap", source.Name),
 			slog.String("host", source.Host),
@@ -127,9 +134,16 @@ func (l *Listener) connectAndListen(ctx context.Context) error {
 	l.log.Info("mailbox opened",
 		slog.String("mailbox", l.source.Mailbox),
 		slog.Uint64("messages", uint64(mbox.Messages)),
+		slog.Uint64("uid_validity", uint64(mbox.UidValidity)),
+		slog.Uint64("uid_next", uint64(mbox.UidNext)),
 	)
 
-	if l.pollOnStart {
+	l.uidValidity = mbox.UidValidity
+	if err := l.initializeProcessing(mbox); err != nil {
+		return err
+	}
+
+	if l.shouldProcessOnStart() {
 		if err := l.processUnread(ctx, c); err != nil {
 			return err
 		}
@@ -190,6 +204,10 @@ func (l *Listener) listenIdle(ctx context.Context, c *client.Client) error {
 func (l *Listener) processUnread(ctx context.Context, c *client.Client) error {
 	criteria := imap.NewSearchCriteria()
 	criteria.WithoutFlags = []string{imap.SeenFlag}
+	if l.minUID > 0 {
+		criteria.Uid = new(imap.SeqSet)
+		criteria.Uid.AddRange(l.minUID, 0)
+	}
 
 	uids, err := c.UidSearch(criteria)
 	if err != nil {
@@ -206,6 +224,9 @@ func (l *Listener) processUnread(ctx context.Context, c *client.Client) error {
 		if ctx.Err() != nil {
 			return nil
 		}
+		if l.shouldSkipUID(uid) {
+			continue
+		}
 		if err := l.processOne(ctx, c, uid); err != nil {
 			l.log.Error("process message failed", slog.Uint64("uid", uint64(uid)), slog.Any("error", err))
 		}
@@ -215,6 +236,11 @@ func (l *Listener) processUnread(ctx context.Context, c *client.Client) error {
 }
 
 func (l *Listener) processOne(ctx context.Context, c *client.Client, uid uint32) error {
+	messageKey := statepkg.MessageKey(l.source.Name, l.source.Mailbox, l.uidValidity, uid)
+	if l.isInCooldown(messageKey) {
+		return nil
+	}
+
 	seqSet := new(imap.SeqSet)
 	seqSet.AddNum(uid)
 
@@ -275,6 +301,9 @@ func (l *Listener) processOne(ctx context.Context, c *client.Client, uid uint32)
 
 	result, err := l.handler(ctx, m)
 	if err != nil {
+		if recordErr := l.store.RecordFailure(messageKey, err, l.backoff, time.Now()); recordErr != nil {
+			l.log.Error("record delivery failure failed", slog.Uint64("uid", uint64(uid)), slog.Any("error", recordErr))
+		}
 		return err
 	}
 	if !result.MarkSeen {
@@ -289,12 +318,105 @@ func (l *Listener) processOne(ctx context.Context, c *client.Client, uid uint32)
 	if err := l.markSeen(c, uid); err != nil {
 		return fmt.Errorf("mark seen uid %d: %w", uid, err)
 	}
+	if err := l.store.ClearFailure(messageKey); err != nil {
+		l.log.Error("clear delivery failure failed", slog.Uint64("uid", uint64(uid)), slog.Any("error", err))
+	}
+	if err := l.advanceCheckpoint(uid); err != nil {
+		l.log.Error("advance checkpoint failed", slog.Uint64("uid", uint64(uid)), slog.Any("error", err))
+	}
 
 	l.log.Info("forwarded and marked seen",
 		slog.Uint64("uid", uint64(uid)),
 		slog.String("from", from),
 		slog.String("subject", subject),
 	)
+	return nil
+}
+
+func (l *Listener) initializeProcessing(mbox *imap.MailboxStatus) error {
+	switch l.processingMode {
+	case "unread_queue":
+		l.minUID = 0
+		return nil
+	case "new_unread_queue":
+		l.minUID = mbox.UidNext
+		return nil
+	case "checkpoint_from_now", "checkpoint_from_unread":
+		return l.initializeCheckpoint(mbox)
+	default:
+		return fmt.Errorf("unsupported processing mode %q", l.processingMode)
+	}
+}
+
+func (l *Listener) initializeCheckpoint(mbox *imap.MailboxStatus) error {
+	key := statepkg.SourceKey(l.source.Name, l.source.Mailbox)
+	current, ok := l.store.GetSource(key)
+	if ok && current.Initialized && current.UIDValidity == mbox.UidValidity {
+		l.minUID = current.LastProcessedUID + 1
+		return nil
+	}
+
+	if ok && current.UIDValidity != 0 && current.UIDValidity != mbox.UidValidity {
+		l.log.Warn("uid validity changed, resetting checkpoint",
+			slog.Uint64("old_uid_validity", uint64(current.UIDValidity)),
+			slog.Uint64("new_uid_validity", uint64(mbox.UidValidity)),
+		)
+	}
+
+	var lastProcessed uint32
+	if l.processingMode == "checkpoint_from_now" && mbox.UidNext > 0 {
+		lastProcessed = mbox.UidNext - 1
+	}
+	next := statepkg.SourceState{
+		UIDValidity:      mbox.UidValidity,
+		LastProcessedUID: lastProcessed,
+		Initialized:      true,
+	}
+	if err := l.store.SetSource(key, next); err != nil {
+		return err
+	}
+	l.minUID = lastProcessed + 1
+	return nil
+}
+
+func (l *Listener) shouldProcessOnStart() bool {
+	return l.processingMode == "unread_queue" || l.processingMode == "checkpoint_from_unread"
+}
+
+func (l *Listener) shouldSkipUID(uid uint32) bool {
+	return l.minUID > 0 && uid < l.minUID
+}
+
+func (l *Listener) isInCooldown(messageKey string) bool {
+	failure, ok := l.store.GetFailure(messageKey)
+	if !ok || failure.NextAttemptAt.IsZero() {
+		return false
+	}
+	now := time.Now()
+	if now.Before(failure.NextAttemptAt) {
+		l.log.Info("skip message in retry cooldown",
+			slog.Int("attempts", failure.Attempts),
+			slog.Time("next_attempt_at", failure.NextAttemptAt),
+		)
+		return true
+	}
+	return false
+}
+
+func (l *Listener) advanceCheckpoint(uid uint32) error {
+	if l.processingMode != "checkpoint_from_now" && l.processingMode != "checkpoint_from_unread" {
+		return nil
+	}
+	key := statepkg.SourceKey(l.source.Name, l.source.Mailbox)
+	current, _ := l.store.GetSource(key)
+	if current.UIDValidity != l.uidValidity {
+		current = statepkg.SourceState{UIDValidity: l.uidValidity, Initialized: true}
+	}
+	if uid > current.LastProcessedUID {
+		current.LastProcessedUID = uid
+		current.Initialized = true
+		return l.store.SetSource(key, current)
+	}
 	return nil
 }
 
